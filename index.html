@@ -62,7 +62,7 @@
 			position: fixed;
 			top: 1.25rem;
 			right: 1.25rem;
-			width: min(300px, 92vw);
+			width: min(250px, 92vw);
 			background: rgba(12, 12, 22, 0.2);
 			border: 1px solid rgba(255, 255, 255, 0.08);
 			border-radius: 1rem;
@@ -117,6 +117,41 @@
 			white-space: nowrap;
 		}
 
+		.cover-art-wrapper {
+			position: relative;
+			width: 100%;
+			aspect-ratio: 1;
+			border-radius: 0.75rem;
+			border: 1px solid rgba(255, 255, 255, 0.12);
+			background: rgba(255, 255, 255, 0.03);
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			overflow: hidden;
+		}
+
+		.cover-art-wrapper img {
+			max-width: 100%;
+			max-height: 100%;
+			object-fit: contain;
+			display: none;
+		}
+
+		.cover-art-placeholder {
+			font-size: 0.75rem;
+			color: rgba(255, 255, 255, 0.5);
+			text-align: center;
+			padding: 1.5rem 0.5rem;
+		}
+
+		.cover-art-wrapper.has-art img {
+			display: block;
+		}
+
+		.cover-art-wrapper.has-art .cover-art-placeholder {
+			display: none;
+		}
+
 		@media (max-width: 600px) {
 			#control-panel {
 				position: static;
@@ -134,7 +169,14 @@
 			<label class="field-label" for="audio-upload">Audio Source</label>
 			<div class="file-picker">
 				<input type="file" id="audio-upload" accept="audio/*">
-				<span class="file-meta" id="audio-file-name" style="margin-left: -50%;">No file selected</span>
+				<span class="file-meta" id="audio-file-name" style="margin-left: -60%;">No file selected</span>
+			</div>
+		</div>
+		<div class="field-group">
+			<span class="field-label">Cover Art</span>
+			<div id="cover-art-wrapper" class="cover-art-wrapper" aria-live="polite">
+				<img id="cover-art-image" alt="Album cover art preview">
+				<span id="cover-art-placeholder" class="cover-art-placeholder">No cover art detected</span>
 			</div>
 		</div>
 		<div class="field-group">
@@ -148,6 +190,8 @@
 		<p>Your browser does not support WebGPU yet. Try Chrome 113+, Edge 113+, or another WebGPU-capable browser with the <code>--enable-unsafe-webgpu</code> flag.</p>
 	</div>
 
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/vibrant.js/1.0.0/Vibrant.min.js" integrity="sha512-V6rhYmJy8NZQF8F0bhJiTM0iI6wX/FKJoWvYrCM15UIeb6p38HjvTZWfO0IxJnMZrHWUJZJqLuWK0zslra2FVw==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
 	<script type="module">
 		const canvas = document.getElementById('webgpu');
 		const fallback = document.getElementById('fallback');
@@ -155,6 +199,9 @@
 		const audioFileNameLabel = document.getElementById('audio-file-name');
 		const pickerGrid = document.getElementById('picker-grid');
 		const pickerDot = document.getElementById('picker-dot');
+		const coverArtWrapper = document.getElementById('cover-art-wrapper');
+		const coverArtImage = document.getElementById('cover-art-image');
+		const coverArtPlaceholder = document.getElementById('cover-art-placeholder');
 
 		if (!('gpu' in navigator)) {
 			fallback.style.display = 'flex';
@@ -174,6 +221,75 @@
 		let audioObjectUrl;
 		let audioFrequencyData;
 		let useAudioData = false;
+		let coverArtObjectUrl;
+
+		// i found an analytic solution but it was more prone to weird artifacts if the color wasn't exactly in the space, so i opted for brute-force instead
+		function invert(at, bt, ct) {
+			function calc(x, y) {
+				const h = 2.01 + 3.0 * x;
+				const s = 0.2 + 1.0 * y;
+				const a = (Math.cos(h - s) + 1.0) / 0.6;
+				const b = (Math.cos(h) + 1.0) / 0.6;
+				const c = (Math.cos(h + s) + 1.0) / 0.6;
+				return [a, b, c];
+			}
+
+			let bestX = 0, bestY = 0;
+			let bestErr = Infinity;
+
+			for (let i = 0; i <= 100; i++) {
+				const x = i / 100;
+				for (let j = 0; j <= 100; j++) {
+				const y = j / 100;
+
+				const [a, b, c] = calc(x, y);
+				const err = Math.pow((a - at), 2) + Math.pow((b - bt), 2) + Math.pow((c - ct), 2);
+
+				if (err < bestErr) {
+					bestErr = err;
+					bestX = x;
+					bestY = y;
+				}
+				}
+			}
+
+			return { x: bestX, y: bestY, error: bestErr };
+		}
+
+		// [00, ff] -> [0, 255]
+		function hexToRGB(hex) {
+			hex = hex.replace(/^#/, '').toLowerCase();
+			const r = parseInt(hex.slice(0, 2), 16);
+			const g = parseInt(hex.slice(2, 4), 16);
+			const b = parseInt(hex.slice(4, 6), 16);
+			return [r, g, b];
+		}
+
+		function rgbToHex(r, g, b) {
+			const toHex = (v) => {
+				const h = v.toString(16);
+				return h.length === 1 ? '0' + h : h;
+			};
+			return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+		}
+
+		function hexToCustom(hex) {
+			let [r, g, b] = hexToRGB(hex);
+			return [r / 255 * 2, g / 255 * 2, b / 255 * 2];
+		}
+
+		//https://stackoverflow.com/a/54070620
+		function hexToHSV(hex) {
+			let [r,g,b] = hexToRGB(hex).map(v => v / 255);
+			let v=Math.max(r,g,b), c=v-Math.min(r,g,b);
+			let h= c && ((v==r) ? (g-b)/c : ((v==g) ? 2+(b-r)/c : 4+(r-g)/c));
+			return [60*(h<0?h+6:h), v&&c/v, v];
+		}
+
+		function hsvToHex(h,s,v) {
+			let f= (n,k=(n+h/60)%6) => v - v*s*Math.max( Math.min(k,4-k,1), 0);
+			return rgbToHex(...[f(5),f(3),f(1)].map(x=>Math.round(x*255)));
+		}
 
 		function clamp(value) {
 			return Math.min(1, Math.max(0, value));
@@ -184,6 +300,237 @@
 				audioFileNameLabel.textContent = text;
 			}
 		}
+
+		function resetCoverArtUI(message = 'No cover art detected') {
+			if (!coverArtWrapper) {
+				return;
+			}
+			if (coverArtObjectUrl) {
+				URL.revokeObjectURL(coverArtObjectUrl);
+				coverArtObjectUrl = undefined;
+			}
+			if (coverArtImage) {
+				coverArtImage.removeAttribute('src');
+				coverArtImage.hidden = true;
+			}
+			coverArtWrapper.classList.remove('has-art');
+			if (coverArtPlaceholder) {
+				coverArtPlaceholder.textContent = message;
+			}
+		}
+
+		function showCoverArtPreview(art) {
+			if (!coverArtWrapper || !coverArtImage || !art) {
+				return;
+			}
+			if (coverArtObjectUrl) {
+				URL.revokeObjectURL(coverArtObjectUrl);
+			}
+			const blob = new Blob([art.binary], { type: art.mimeType || 'image/jpeg' });
+			coverArtObjectUrl = URL.createObjectURL(blob);
+			coverArtImage.src = coverArtObjectUrl;
+			coverArtImage.alt = art.description || 'Album cover art preview';
+			coverArtImage.hidden = false;
+			coverArtWrapper.classList.add('has-art');
+			if (coverArtPlaceholder) {
+				coverArtPlaceholder.textContent = art.description || 'Embedded cover art';
+			}
+			scheduleVibrantExtraction();
+		}
+
+		async function handleCoverArt(file) {
+			if (!coverArtWrapper || !file) {
+				return;
+			}
+			resetCoverArtUI('Looking for cover art…');
+			try {
+				const art = await extractCoverArt(file);
+				if (art) {
+					showCoverArtPreview(art);
+					return;
+				}
+			} catch (error) {
+				console.warn('Cover art extraction failed', error);
+			}
+			resetCoverArtUI('No cover art detected');
+		}
+
+		async function extractCoverArt(file) {
+			const headerBuffer = await file.slice(0, 10).arrayBuffer();
+			const headerBytes = new Uint8Array(headerBuffer);
+			if (headerBytes.length < 10 || headerBytes[0] !== 0x49 || headerBytes[1] !== 0x44 || headerBytes[2] !== 0x33) {
+				return null;
+			}
+			const tagSize = decodeSynchsafe(headerBytes.subarray(6, 10));
+			if (!tagSize) {
+				return null;
+			}
+			const totalSize = Math.min(tagSize + 10, file.size);
+			const tagBuffer = await file.slice(0, totalSize).arrayBuffer();
+			const tagBytes = new Uint8Array(tagBuffer);
+			return parseApicFrame(tagBytes);
+		}
+
+		function parseApicFrame(tagBytes) {
+			const version = tagBytes[3];
+			if (version < 3) {
+				return null;
+			}
+			const declaredSize = decodeSynchsafe(tagBytes.subarray(6, 10)) + 10;
+			const tagLimit = Math.min(tagBytes.length, declaredSize);
+			let offset = 10;
+			const flags = tagBytes[5];
+			if ((flags & 0x40) !== 0) {
+				if (version === 4 && offset + 4 <= tagLimit) {
+					const extSize = decodeSynchsafe(tagBytes.subarray(offset, offset + 4));
+					offset += 4 + extSize;
+				} else if (version === 3 && offset + 4 <= tagLimit) {
+					const extSize = readUInt32BE(tagBytes, offset);
+					offset += 4 + extSize;
+				}
+			}
+			while (offset + 10 <= tagLimit) {
+				const frameId = asciiString(tagBytes.subarray(offset, offset + 4));
+				const frameSize = version === 4
+					? decodeSynchsafe(tagBytes.subarray(offset + 4, offset + 8))
+					: readUInt32BE(tagBytes, offset + 4);
+				if (!frameId.trim() || frameSize <= 0) {
+					break;
+				}
+				const frameDataStart = offset + 10;
+				const frameDataEnd = frameDataStart + frameSize;
+				if (frameDataEnd > tagLimit) {
+					break;
+				}
+				if (frameId === 'APIC') {
+					const art = decodeApicFrameData(tagBytes.subarray(frameDataStart, frameDataEnd));
+					if (art) {
+						return art;
+					}
+				}
+				offset = frameDataEnd;
+			}
+			return null;
+		}
+
+		function decodeSynchsafe(bytes) {
+			let value = 0;
+			for (let i = 0; i < bytes.length; i++) {
+				value = (value << 7) | (bytes[i] & 0x7f);
+			}
+			return value;
+		}
+
+		function readUInt32BE(bytes, offset) {
+			return (
+				((bytes[offset] << 24) >>> 0) |
+				((bytes[offset + 1] << 16) >>> 0) |
+				((bytes[offset + 2] << 8) >>> 0) |
+				(bytes[offset + 3] >>> 0)
+			) >>> 0;
+		}
+
+		function asciiString(bytes) {
+			let result = '';
+			for (let i = 0; i < bytes.length; i++) {
+				result += String.fromCharCode(bytes[i]);
+			}
+			return result;
+		}
+
+		function decodeApicFrameData(frameData) {
+			if (!frameData.length) {
+				return null;
+			}
+			let offset = 0;
+			const encoding = frameData[offset];
+			offset += 1;
+			const mimeTerminator = frameData.indexOf(0, offset);
+			const mimeEnd = mimeTerminator === -1 ? frameData.length : mimeTerminator;
+			const mimeType = asciiString(frameData.subarray(offset, mimeEnd)).trim() || 'image/jpeg';
+			offset = mimeTerminator === -1 ? frameData.length : mimeEnd + 1;
+			if (offset >= frameData.length) {
+				return null;
+			}
+			offset += 1; // skip picture type byte
+			if (offset > frameData.length) {
+				return null;
+			}
+			const isUtf16 = encoding === 1 || encoding === 2;
+			const descTerminator = findTerminatorIndex(frameData, offset, isUtf16 ? 2 : 1);
+			const hasTerminator = descTerminator < frameData.length;
+			offset = isUtf16
+				? (hasTerminator ? descTerminator + 2 : frameData.length)
+				: (hasTerminator ? descTerminator + 1 : frameData.length);
+			if (offset >= frameData.length) {
+				return null;
+			}
+			return {
+				mimeType,
+				description: '',
+				binary: frameData.subarray(offset),
+			};
+		}
+
+		function findTerminatorIndex(bytes, start, step) {
+			if (step === 2) {
+				for (let i = start; i + 1 < bytes.length; i += 2) {
+					if (bytes[i] === 0 && bytes[i + 1] === 0) {
+						return i;
+					}
+				}
+				return bytes.length;
+			}
+			for (let i = start; i < bytes.length; i++) {
+				if (bytes[i] === 0) {
+					return i;
+				}
+			}
+			return bytes.length;
+		}
+
+		function scheduleVibrantExtraction() {
+			if (!coverArtImage) {
+				return;
+			}
+			if (coverArtImage.complete && coverArtImage.naturalWidth > 0) {
+				logVibrantSwatch();
+			} else {
+				coverArtImage.addEventListener('load', logVibrantSwatch, { once: true });
+			}
+		}
+
+		function logVibrantSwatch() {
+			if (!coverArtImage || !coverArtImage.src) {
+				return;
+			}
+			if (typeof Vibrant === 'undefined') {
+				console.warn('Vibrant.js is not available; skipping color extraction.');
+				return;
+			}
+			try {
+				const vibrant = new Vibrant(coverArtImage);
+				const swatches = vibrant.swatches();
+				const vibrantSwatch = swatches && swatches.Vibrant;
+				if (vibrantSwatch) {
+					let hsv = hexToHSV(vibrantSwatch.getHex());
+					hsv[1] = 1.0; // max saturation seems to be more accurate for this color space
+					const newP = invert(...hexToCustom(hsvToHex(...hsv)));
+					setPointerFromRelative(newP.x, newP.y);
+				} else {
+					console.log('Cover art processed but no vibrant swatch detected.');
+				}
+			} catch (error) {
+				console.warn('Vibrant color extraction failed', error);
+			}
+		}
+
+		resetCoverArtUI();
+		window.addEventListener('beforeunload', () => {
+			if (coverArtObjectUrl) {
+				URL.revokeObjectURL(coverArtObjectUrl);
+			}
+		});
 
 		function updatePickerDot() {
 			if (!pickerDot) {
@@ -319,14 +666,21 @@
 			});
 		}
 		if (audioUploadInput) {
-			audioUploadInput.addEventListener('change', (event) => {
-				const file = event.target.files && event.target.files[0];
+			audioUploadInput.addEventListener('change', async (event) => {
+				const target = event.target;
+				if (!(target instanceof HTMLInputElement)) {
+					return;
+				}
+				const file = target.files && target.files[0];
 				if (file) {
 					setAudioFileLabel(file.name);
-					setupAudioFromFile(file);
-					event.target.value = '';
+					const audioPromise = setupAudioFromFile(file);
+					const artPromise = handleCoverArt(file);
+					await Promise.allSettled([audioPromise, artPromise]);
+					target.value = '';
 				} else {
 					setAudioFileLabel();
+					resetCoverArtUI();
 				}
 			});
 		}

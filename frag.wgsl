@@ -24,6 +24,11 @@ const JUICE: f32 = 1.0;
 const FLASH: f32 = 2.0;
 const NOISE: f32 = 0.4;//should be 0.2
 
+/* Start Additions */
+const PREVIEW_RATIO: f32 = 0.2;
+/* End Additions */
+
+
 //White noise (2D in, 1D out)
 fn w1(p: vec2<f32>) -> f32 {
     let a = 12.9898;
@@ -97,4 +102,15 @@ fn main(@builtin(position) fragCoord: vec4<f32>,
     col = col / NUM * BRIGHTNESS;
     col = tanh(clamp(col, vec3<f32>(0.0), vec3<f32>(4.0)));
     return vec4<f32>(col, 1.0);
+
+    /* Start Additions */
+    // let prevVars = vec3<f32>(0.6, -0.3, 0.3); //d, z, spec
+    // let satPreview = 0.2 + fragmentUniforms.picker.y;
+    // let huePreview = prevVars.x * 2.0 + prevVars.y * 0.3 + fragmentUniforms.picker.x * 3.0 + 3.0 * prevVars.z;
+    // let preview = (cos(huePreview + satPreview * vec3<f32>(-1.0, 0.0, 1.0)) + 1.0) / (prevVars.x * 1);
+    // let inPreview = fragCoord.x < fragmentUniforms.resolution.x * PREVIEW_RATIO &&
+    //                 fragCoord.y < fragmentUniforms.resolution.y * PREVIEW_RATIO;
+    // let finalCol = select(col, preview, inPreview);
+    // return vec4<f32>(finalCol, 1.0);
+    /* End Additions */
 }
