@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<title>opera_sonic · WebGPU Demo</title>
+	<meta name="viewport" content="width=device-width,initial-scale=1">
+	<style>
+		:root, body {
+			margin: 0;
+			height: 100%;
+			background: #050505;
+			color: #f0f0f0;
+			font-family: system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif;
+		}
+
+		canvas {
+			display: block;
+			width: 100vw;
+			height: 100vh;
+		}
+
+		.field-group {
+			display: flex;
+			flex-direction: column;
+			gap: 0.4rem;
+			font-size: 0.85rem;
+		}
+
+		#picker-grid {
+			position: relative;
+			width: min(300px, 100%);
+			aspect-ratio: 1;
+			border-radius: 0.5rem;
+			border: 1px solid rgba(255, 255, 255, 0.18);
+			background:
+				radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0), transparent 55%), /* idk why but removing this breaks it */
+				linear-gradient(90deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px),
+				linear-gradient(0deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px);
+			background-size: 140% 140%, 20px 20px, 20px 20px;
+			box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.55);
+			cursor: grab;
+			user-select: none;
+			touch-action: none;
+			overflow: hidden;
+		}
+
+		#picker-grid.dragging {
+			cursor: grabbing;
+		}
+
+		#picker-dot {
+			position: absolute;
+			width: 0.9rem;
+			height: 0.9rem;
+			border-radius: 50%;
+			background: #e8ecff;
+			box-shadow: 0 0 0.4rem rgba(229, 233, 255, 0.8);
+			transform: translate(-50%, -50%);
+			pointer-events: none;
+		}
+		#control-panel {
+			position: fixed;
+			top: 1.25rem;
+			right: 1.25rem;
+			width: min(300px, 92vw);
+			background: rgba(12, 12, 22, 0.2);
+			border: 1px solid rgba(255, 255, 255, 0.08);
+			border-radius: 1rem;
+			padding: 1.25rem 1.5rem;
+			backdrop-filter: blur(12px);
+			box-shadow: 0 20px 45px rgba(0, 0, 0, 0.55);
+			pointer-events: auto;
+			z-index: 5;
+			display: flex;
+			flex-direction: column;
+			gap: 1rem;
+		}
+
+		.field-label {
+			font-size: 0.8rem;
+			font-weight: 600;
+			letter-spacing: 0.02em;
+			color: rgba(255, 255, 255, 0.7);
+		}
+
+		.file-picker {
+			display: flex;
+			align-items: center;
+			padding-top: 0.35rem;
+			
+			border-radius: 0.65rem;
+		}
+
+		.file-picker input[type="file"] {
+			flex-shrink: 0;
+			color: transparent;
+			width: auto;
+		}
+
+		.file-picker input[type="file"]::file-selector-button,
+		.file-picker input[type="file"]::-webkit-file-upload-button {
+			background: rgba(255, 255, 255, 0.08);
+			border: 1px solid rgba(255, 255, 255, 0.12);
+			border-radius: 0.5rem;
+			color: #f8f8ff;
+			padding: 0.4rem 0.9rem;
+			cursor: pointer;
+			letter-spacing: 0.05em;
+			font-size: 0.7rem;
+		}
+
+		.file-meta {
+			font-size: 0.75rem;
+			color: rgba(255, 255, 255, 0.65);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		@media (max-width: 600px) {
+			#control-panel {
+				position: static;
+				width: auto;
+				margin: 0.75rem;
+				padding: 1rem;
+			}
+		}
+	</style>
+</head>
+<body>
+	<canvas id="webgpu" height="767" width="969"></canvas>
+	<div id="control-panel">
+		<div class="field-group">
+			<label class="field-label" for="audio-upload">Audio Source</label>
+			<div class="file-picker">
+				<input type="file" id="audio-upload" accept="audio/*">
+				<span class="file-meta" id="audio-file-name" style="margin-left: -50%;">No file selected</span>
+			</div>
+		</div>
+		<div class="field-group">
+			<span class="field-label">Color</span>
+			<div id="picker-grid" tabindex="0" aria-label="2D picker" role="slider" aria-valuemin="0" aria-valuemax="1">
+				<div id="picker-dot"></div>
+			</div>
+		</div>
+	</div>
+	<div id="fallback" style="display: none;">
+		<p>Your browser does not support WebGPU yet. Try Chrome 113+, Edge 113+, or another WebGPU-capable browser with the <code>--enable-unsafe-webgpu</code> flag.</p>
+	</div>
+
+	<script type="module">
+		const canvas = document.getElementById('webgpu');
+		const fallback = document.getElementById('fallback');
+		const audioUploadInput = document.getElementById('audio-upload');
+		const audioFileNameLabel = document.getElementById('audio-file-name');
+		const pickerGrid = document.getElementById('picker-grid');
+		const pickerDot = document.getElementById('picker-dot');
+
+		if (!('gpu' in navigator)) {
+			fallback.style.display = 'flex';
+			canvas.style.display = 'none';
+			throw new Error('WebGPU not available');
+		}
+
+		const FFT_WIDTH = 512;
+		const FFT_HEIGHT = 64;
+		const uniformArrayBuffer = new ArrayBuffer(64);
+		const uniformFloats = new Float32Array(uniformArrayBuffer);
+		const pointer = { x: 0.5, y: 0.5 };
+		let audioContext;
+		let analyser;
+		let audioSourceNode;
+		let audioElement;
+		let audioObjectUrl;
+		let audioFrequencyData;
+		let useAudioData = false;
+
+		function clamp(value) {
+			return Math.min(1, Math.max(0, value));
+		}
+
+		function setAudioFileLabel(text = 'No file selected') {
+			if (audioFileNameLabel) {
+				audioFileNameLabel.textContent = text;
+			}
+		}
+
+		function updatePickerDot() {
+			if (!pickerDot) {
+				return;
+			}
+			pickerDot.style.left = `${pointer.x * 100}%`;
+			pickerDot.style.top = `${pointer.y * 100}%`;
+
+			if (pickerGrid) {
+				pickerGrid.setAttribute('aria-valuetext', `X ${pointer.x.toFixed(2)}, Y ${pointer.y.toFixed(2)}`);
+			}
+		}
+
+		function setPointerFromRelative(relX, relY) {
+			pointer.x = clamp(relX);
+			pointer.y = clamp(relY);
+			uniformFloats[10] = pointer.x;
+			uniformFloats[11] = pointer.y;
+			updatePickerDot();
+		}
+
+		function pointerEventToRelative(event) {
+			if (!pickerGrid) {
+				return { x: pointer.x, y: pointer.y };
+			}
+			const rect = pickerGrid.getBoundingClientRect();
+			const relX = clamp((event.clientX - rect.left) / rect.width);
+			const relY = clamp((event.clientY - rect.top) / rect.height);
+			return { x: relX, y: relY };
+		}
+
+		async function setupAudioFromFile(file) {
+			try {
+				if (!file) {
+					return;
+				}
+				if (!audioContext) {
+					audioContext = new (window.AudioContext || window.webkitAudioContext)();
+				}
+				if (audioElement) {
+					audioElement.pause();
+					audioElement.src = '';
+				}
+				if (audioSourceNode) {
+					audioSourceNode.disconnect();
+					audioSourceNode = undefined;
+				}
+				if (analyser) {
+					analyser.disconnect();
+					analyser = undefined;
+				}
+				if (audioObjectUrl) {
+					URL.revokeObjectURL(audioObjectUrl);
+					audioObjectUrl = undefined;
+				}
+				audioObjectUrl = URL.createObjectURL(file);
+				audioElement = new Audio();
+				audioElement.src = audioObjectUrl;
+				audioElement.loop = true;
+				audioElement.crossOrigin = 'anonymous';
+				audioSourceNode = audioContext.createMediaElementSource(audioElement);
+				analyser = audioContext.createAnalyser();
+				analyser.fftSize = FFT_WIDTH * 2;
+				analyser.smoothingTimeConstant = 0.8;
+				audioSourceNode.connect(analyser);
+				analyser.connect(audioContext.destination);
+				audioFrequencyData = new Uint8Array(analyser.frequencyBinCount);
+				await audioContext.resume();
+				await audioElement.play();
+				useAudioData = true;
+			} catch (error) {
+				console.error('Audio setup failed', error);
+				useAudioData = false;
+			}
+		}
+		if (pickerGrid) {
+			const KEY_STEP = 0.02;
+			let isDraggingPicker = false;
+			pickerGrid.addEventListener('pointerdown', (event) => {
+				event.preventDefault();
+				pickerGrid.setPointerCapture(event.pointerId);
+				isDraggingPicker = true;
+				pickerGrid.classList.add('dragging');
+				const { x, y } = pointerEventToRelative(event);
+				setPointerFromRelative(x, y);
+			});
+			pickerGrid.addEventListener('pointermove', (event) => {
+				if (!isDraggingPicker) {
+					return;
+				}
+				const { x, y } = pointerEventToRelative(event);
+				setPointerFromRelative(x, y);
+			});
+			const endDrag = (event) => {
+				if (!isDraggingPicker) {
+					return;
+				}
+				isDraggingPicker = false;
+				pickerGrid.classList.remove('dragging');
+				if (pickerGrid.hasPointerCapture(event.pointerId)) {
+					pickerGrid.releasePointerCapture(event.pointerId);
+				}
+			};
+			pickerGrid.addEventListener('pointerup', endDrag);
+			pickerGrid.addEventListener('pointercancel', endDrag);
+			pickerGrid.addEventListener('keydown', (event) => {
+				let handled = true;
+				switch (event.key) {
+					case 'ArrowLeft':
+						setPointerFromRelative(pointer.x - KEY_STEP, pointer.y);
+						break;
+					case 'ArrowRight':
+						setPointerFromRelative(pointer.x + KEY_STEP, pointer.y);
+						break;
+					case 'ArrowUp':
+						setPointerFromRelative(pointer.x, pointer.y - KEY_STEP);
+						break;
+					case 'ArrowDown':
+						setPointerFromRelative(pointer.x, pointer.y + KEY_STEP);
+						break;
+					case 'Home':
+						setPointerFromRelative(0, 0);
+						break;
+					case 'End':
+						setPointerFromRelative(1, 1);
+						break;
+					default:
+						handled = false;
+				}
+				if (handled) {
+					event.preventDefault();
+				}
+			});
+		}
+		if (audioUploadInput) {
+			audioUploadInput.addEventListener('change', (event) => {
+				const file = event.target.files && event.target.files[0];
+				if (file) {
+					setAudioFileLabel(file.name);
+					setupAudioFromFile(file);
+					event.target.value = '';
+				} else {
+					setAudioFileLabel();
+				}
+			});
+		}
+
+		setPointerFromRelative(pointer.x, pointer.y);
+
+		async function loadShaderSource(path) {
+			const response = await fetch(path);
+			if (!response.ok) {
+				throw new Error(`Failed to load ${path}: ${response.status}`);
+			}
+			return response.text();
+		}
+
+		async function init() {
+			const adapter = await navigator.gpu.requestAdapter();
+			if (!adapter) {
+				throw new Error('No suitable GPU adapter found');
+			}
+			const device = await adapter.requestDevice();
+			const context = canvas.getContext('webgpu');
+			const format = navigator.gpu.getPreferredCanvasFormat();
+
+			function configureContext() {
+				const dpr = window.devicePixelRatio || 1;
+				const width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+				const height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+				if (canvas.width !== width || canvas.height !== height) {
+					canvas.width = width;
+					canvas.height = height;
+				}
+				context.configure({
+					device,
+					format,
+					alphaMode: 'opaque',
+					usage: GPUTextureUsage.RENDER_ATTACHMENT,
+					size: { width, height },
+				});
+				uniformFloats[12] = width;
+				uniformFloats[13] = height;
+			}
+
+			configureContext();
+			window.addEventListener('resize', configureContext);
+
+			const [vertexSource, fragmentSource] = await Promise.all([
+				loadShaderSource('./vert.wgsl'),
+				loadShaderSource('./frag.wgsl'),
+			]);
+
+			const vertexModule = device.createShaderModule({ code: vertexSource });
+			const fragmentModule = device.createShaderModule({ code: fragmentSource });
+
+			const vertices = new Float32Array([
+				-1, -1,
+				1, -1,
+				1,  1,
+				-1, -1,
+				1,  1,
+				-1,  1,
+			]);
+
+			const vertexBuffer = device.createBuffer({
+				size: vertices.byteLength,
+				usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+				mappedAtCreation: true,
+			});
+			new Float32Array(vertexBuffer.getMappedRange()).set(vertices);
+			vertexBuffer.unmap();
+
+			const uniformBuffer = device.createBuffer({
+				size: uniformArrayBuffer.byteLength,
+				usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+			});
+
+			uniformFloats[10] = pointer.x;           // picker.x
+			uniformFloats[11] = pointer.y;           // picker.y
+			uniformFloats[12] = canvas.width;
+			uniformFloats[13] = canvas.height;
+			device.queue.writeBuffer(uniformBuffer, 0, uniformArrayBuffer);
+
+			const fftTexture = device.createTexture({
+				size: { width: FFT_WIDTH, height: FFT_HEIGHT },
+				format: 'rgba32float',
+				usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+			});
+
+			const fftSampler = device.createSampler({
+				addressModeU: 'repeat',
+				addressModeV: 'repeat',
+				magFilter: 'nearest',
+				minFilter: 'nearest',
+			});
+
+			const fftData = new Float32Array(FFT_WIDTH * FFT_HEIGHT * 4);
+			const bytesPerRow = FFT_WIDTH * Float32Array.BYTES_PER_ELEMENT * 4;
+			function updateFFT() {
+				if (useAudioData && analyser && audioFrequencyData) {
+					analyser.getByteFrequencyData(audioFrequencyData);
+					for (let y = 0; y < FFT_HEIGHT; y++) {
+						for (let x = 0; x < FFT_WIDTH; x++) {
+							const freqIndex = Math.min(x, audioFrequencyData.length - 1);
+							const amp = audioFrequencyData[freqIndex] / 255;
+							const idx = (y * FFT_WIDTH + x) * 4;
+							fftData[idx] = amp*0.6;
+						}
+					}
+				} else {
+					fftData.fill(0);
+				}
+				device.queue.writeTexture(
+					{ texture: fftTexture },
+					fftData,
+					{ bytesPerRow, rowsPerImage: FFT_HEIGHT },
+					{ width: FFT_WIDTH, height: FFT_HEIGHT }
+				);
+			}
+
+			const uniformsBindGroupLayout = device.createBindGroupLayout({
+				entries: [
+				{
+					binding: 0,
+					visibility: GPUShaderStage.FRAGMENT,
+					buffer: { type: 'uniform' },
+				},
+				],
+			});
+
+			const audioBindGroupLayout = device.createBindGroupLayout({
+				entries: [
+				{
+					binding: 1,
+					visibility: GPUShaderStage.FRAGMENT,
+					texture: { sampleType: 'unfilterable-float' },
+				},
+				{
+					binding: 2,
+					visibility: GPUShaderStage.FRAGMENT,
+					sampler: { type: 'non-filtering' },
+				},
+				],
+			});
+
+			const pipeline = device.createRenderPipeline({
+				layout: device.createPipelineLayout({
+				bindGroupLayouts: [uniformsBindGroupLayout, audioBindGroupLayout],
+				}),
+				vertex: {
+				module: vertexModule,
+				entryPoint: 'main',
+				buffers: [
+					{
+					arrayStride: 8,
+					attributes: [
+						{ shaderLocation: 0, offset: 0, format: 'float32x2' },
+					],
+					},
+				],
+				},
+				fragment: {
+				module: fragmentModule,
+				entryPoint: 'main',
+				targets: [{ format }],
+				},
+				primitive: { topology: 'triangle-list' },
+			});
+
+			const uniformsBindGroup = device.createBindGroup({
+				layout: uniformsBindGroupLayout,
+				entries: [
+				{ binding: 0, resource: { buffer: uniformBuffer } },
+				],
+			});
+
+			const audioBindGroup = device.createBindGroup({
+				layout: audioBindGroupLayout,
+				entries: [
+				{ binding: 1, resource: fftTexture.createView() },
+				{ binding: 2, resource: fftSampler },
+				],
+			});
+
+			function updateUniforms(timeSeconds) {
+				uniformFloats[8] = timeSeconds*0.8;
+				uniformFloats[10] = pointer.x;
+				uniformFloats[11] = pointer.y;
+				uniformFloats[12] = canvas.width;
+				uniformFloats[13] = canvas.height;
+				device.queue.writeBuffer(uniformBuffer, 0, uniformArrayBuffer);
+			}
+
+			function render(timeMs) {
+				const timeSeconds = timeMs * 0.001;
+				updateUniforms(timeSeconds);
+				updateFFT();
+
+				const commandEncoder = device.createCommandEncoder();
+				const textureView = context.getCurrentTexture().createView();
+				const passEncoder = commandEncoder.beginRenderPass({
+				colorAttachments: [
+					{
+						view: textureView,
+						clearValue: { r: 0, g: 0, b: 0, a: 1 },
+						loadOp: 'clear',
+						storeOp: 'store',
+					},
+				],
+				});
+
+				passEncoder.setPipeline(pipeline);
+				passEncoder.setVertexBuffer(0, vertexBuffer);
+				passEncoder.setBindGroup(0, uniformsBindGroup);
+				passEncoder.setBindGroup(1, audioBindGroup);
+				passEncoder.draw(6, 1, 0, 0);
+				passEncoder.end();
+
+				device.queue.submit([commandEncoder.finish()]);
+				requestAnimationFrame(render);
+			}
+
+			requestAnimationFrame(render);
+		}
+
+		init().catch((error) => {
+			console.error(error);
+			fallback.style.display = 'flex';
+			fallback.textContent = error.message;
+		});
+	</script>
+</body>
+</html>
