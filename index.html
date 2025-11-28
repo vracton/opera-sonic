@@ -214,6 +214,8 @@
 		const uniformArrayBuffer = new ArrayBuffer(64);
 		const uniformFloats = new Float32Array(uniformArrayBuffer);
 		const pointer = { x: 0.5, y: 0.5 };
+		const easedPointer = { x: pointer.x, y: pointer.y };
+		const POINTER_EASE = 0.01;
 		let audioContext;
 		let analyser;
 		let audioSourceNode;
@@ -782,8 +784,8 @@
 				usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
 			});
 
-			uniformFloats[10] = pointer.x;           // picker.x
-			uniformFloats[11] = pointer.y;           // picker.y
+			uniformFloats[10] = easedPointer.x;      // picker.x
+			uniformFloats[11] = easedPointer.y;      // picker.y
 			uniformFloats[12] = canvas.width;
 			uniformFloats[13] = canvas.height;
 			device.queue.writeBuffer(uniformBuffer, 0, uniformArrayBuffer);
@@ -890,9 +892,11 @@
 			});
 
 			function updateUniforms(timeSeconds) {
+				easedPointer.x += (pointer.x - easedPointer.x) * POINTER_EASE;
+				easedPointer.y += (pointer.y - easedPointer.y) * POINTER_EASE;
 				uniformFloats[8] = timeSeconds*0.8;
-				uniformFloats[10] = pointer.x;
-				uniformFloats[11] = pointer.y;
+				uniformFloats[10] = easedPointer.x;
+				uniformFloats[11] = easedPointer.y;
 				uniformFloats[12] = canvas.width;
 				uniformFloats[13] = canvas.height;
 				device.queue.writeBuffer(uniformBuffer, 0, uniformArrayBuffer);
