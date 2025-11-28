@@ -224,7 +224,7 @@
 		let coverArtObjectUrl;
 
 		// i found an analytic solution but it was more prone to weird artifacts if the color wasn't exactly in the space, so i opted for brute-force instead
-		function invert(at, bt, ct) {
+		function invert(rt, gt, bt) {
 			function calc(x, y) {
 				const h = 2.01 + 3.0 * x;
 				const s = 0.2 + 1.0 * y;
@@ -237,13 +237,15 @@
 			let bestX = 0, bestY = 0;
 			let bestErr = Infinity;
 
+			const [lt, at, bt2] = customToLab(rt, gt, bt);
+
 			for (let i = 0; i <= 100; i++) {
 				const x = i / 100;
 				for (let j = 0; j <= 100; j++) {
 				const y = j / 100;
 
-				const [a, b, c] = calc(x, y);
-				const err = Math.pow((a - at), 2) + Math.pow((b - bt), 2) + Math.pow((c - ct), 2);
+				const [l, a, b] = customToLab(...calc(x, y));
+				const err = Math.pow((l - lt), 2) + Math.pow((a - at), 2) + Math.pow((b - bt2), 2);
 
 				if (err < bestErr) {
 					bestErr = err;
@@ -278,17 +280,43 @@
 			return [r / 255 * 2, g / 255 * 2, b / 255 * 2];
 		}
 
-		//https://stackoverflow.com/a/54070620
-		function hexToHSV(hex) {
-			let [r,g,b] = hexToRGB(hex).map(v => v / 255);
-			let v=Math.max(r,g,b), c=v-Math.min(r,g,b);
-			let h= c && ((v==r) ? (g-b)/c : ((v==g) ? 2+(b-r)/c : 4+(r-g)/c));
-			return [60*(h<0?h+6:h), v&&c/v, v];
+		// https://www.image-engineering.de/library/technotes/958-how-to-convert-between-srgb-and-ciexyz
+		function customToXYZ(r, g, b) {
+			let vals = [r, g, b].map(v => v/2);
+			
+			vals.map(v => {
+				if (v <= 0.04045) {
+					return v/12.91;
+				} else {
+					return Math.pow((v+0.055)/1.055, 2.4);
+				}
+			})
+
+			let res = []
+			res[0] = 0.4124564 * vals[0] + 0.3575761 * vals[1] + 0.1804375 * vals[2];
+			res[1] = 0.2126729 * vals[0] + 0.7151522 * vals[1] + 0.0721750 * vals[2];
+			res[2] = 0.0193339 * vals[0] + 0.1191920 * vals[1] + 0.9503041 * vals[2];
+
+			return res;
 		}
 
-		function hsvToHex(h,s,v) {
-			let f= (n,k=(n+h/60)%6) => v - v*s*Math.max( Math.min(k,4-k,1), 0);
-			return rgbToHex(...[f(5),f(3),f(1)].map(x=>Math.round(x*255)));
+		// https://en.wikipedia.org/wiki/CIELAB_color_space#From_CIE_XYZ_to_CIELAB
+		function xyzToLAB(x, y, z) {
+			function f(t) {
+				const d = 6/29;
+				if (t > Math.pow(d, 3)) {
+					return Math.cbrt(t);
+				} else {
+					return t/(3*d*d) + 4/29;
+				}
+			}
+
+			return [116*f(y/100)-16, 500*(f(x/95.0489)-f(y/100)), 200*(f(y/100)-f(z/108.8840))];
+		}
+
+		function customToLab(r, g, b) {
+			const [x, y, z] = customToXYZ(r, g, b);
+			return xyzToLAB(x, y, z);
 		}
 
 		function clamp(value) {
@@ -513,9 +541,7 @@
 				const swatches = vibrant.swatches();
 				const vibrantSwatch = swatches && swatches.Vibrant;
 				if (vibrantSwatch) {
-					let hsv = hexToHSV(vibrantSwatch.getHex());
-					hsv[1] = 1.0; // max saturation seems to be more accurate for this color space
-					const newP = invert(...hexToCustom(hsvToHex(...hsv)));
+					const newP = invert(...hexToCustom(vibrantSwatch.getHex()));
 					setPointerFromRelative(newP.x, newP.y);
 				} else {
 					console.log('Cover art processed but no vibrant swatch detected.');
