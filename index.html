@@ -210,7 +210,7 @@
 		}
 
 		const FFT_WIDTH = 512;
-		const FFT_HEIGHT = 64;
+		const FFT_HEIGHT = 16;
 		const uniformArrayBuffer = new ArrayBuffer(64);
 		const uniformFloats = new Float32Array(uniformArrayBuffer);
 		const pointer = { x: 0.5, y: 0.5 };
@@ -792,30 +792,35 @@
 
 			const fftTexture = device.createTexture({
 				size: { width: FFT_WIDTH, height: FFT_HEIGHT },
-				format: 'rgba32float',
+				format: 'r32float',
 				usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
 			});
 
 			const fftSampler = device.createSampler({
-				addressModeU: 'repeat',
-				addressModeV: 'repeat',
+				addressModeU: 'clamp-to-edge',
+				addressModeV: 'clamp-to-edge',
 				magFilter: 'nearest',
 				minFilter: 'nearest',
 			});
 
-			const fftData = new Float32Array(FFT_WIDTH * FFT_HEIGHT * 4);
-			const bytesPerRow = FFT_WIDTH * Float32Array.BYTES_PER_ELEMENT * 4;
+			// Opera packs the FFT as a scrolling spectrogram: 1 float per texel (r32float),
+			// X = frequency bin, Y = time history (row 0 = newest, higher rows = older).
+			const FFT_GAIN = 1.0;
+			const fftData = new Float32Array(FFT_WIDTH * FFT_HEIGHT);
+			const fftRow = new Float32Array(FFT_WIDTH);
+			const bytesPerRow = FFT_WIDTH * Float32Array.BYTES_PER_ELEMENT;
 			function updateFFT() {
 				if (useAudioData && analyser && audioFrequencyData) {
 					analyser.getByteFrequencyData(audioFrequencyData);
-					for (let y = 0; y < FFT_HEIGHT; y++) {
-						for (let x = 0; x < FFT_WIDTH; x++) {
-							const freqIndex = Math.min(x, audioFrequencyData.length - 1);
-							const amp = audioFrequencyData[freqIndex] / 255;
-							const idx = (y * FFT_WIDTH + x) * 4;
-							fftData[idx] = amp*0.6;
-						}
+					for (let x = 0; x < FFT_WIDTH; x++) {
+						const freqIndex = Math.min(x, audioFrequencyData.length - 1);
+						fftRow[x] = (audioFrequencyData[freqIndex] / 255) * FFT_GAIN;
 					}
+					// scroll history down one row, oldest falls off the bottom
+					for (let y = FFT_HEIGHT - 1; y > 0; y--) {
+						fftData.copyWithin(y * FFT_WIDTH, (y - 1) * FFT_WIDTH, y * FFT_WIDTH);
+					}
+					fftData.set(fftRow, 0); // newest frame -> row 0
 				} else {
 					fftData.fill(0);
 				}
